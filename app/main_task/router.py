@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session, selectinload
 
 from app.database import get_db
@@ -8,37 +8,6 @@ from app.main_task.schema import MainTaskCreate, MainTaskRead, MainTaskUpdate, M
 router = APIRouter(prefix="/main-tasks", tags=["Main Tasks"])
 
 
-def serialize_main_task(task: MainTask, include_sub_tasks: bool = False) -> dict:
-    data = {
-        "id": task.id,
-        "title": task.title,
-        "slug": task.slug,
-        "description": task.description,
-        "about": task.description,
-        "due_date": None,
-        "created_date": task.created_at.isoformat() if task.created_at else None,
-        "updated_date": task.updated_at.isoformat() if task.updated_at else None,
-        "assign_to": task.assign_to,
-    }
-    if include_sub_tasks:
-        data["sub_tasks"] = [
-            {
-                "id": sub_task.id,
-                "main_task_id": sub_task.main_task_id,
-                "title": sub_task.title,
-                "slug": sub_task.slug,
-                "description": sub_task.description,
-                "about": sub_task.description,
-                "due_date": None,
-                "created_date": sub_task.created_at.isoformat() if sub_task.created_at else None,
-                "updated_date": sub_task.updated_at.isoformat() if sub_task.updated_at else None,
-                "assign_to": sub_task.assign_to,
-            }
-            for sub_task in task.sub_tasks
-        ]
-    return data
-
-
 def ensure_main_task_slug_is_unique(db: Session, slug: str, current_task_id: int | None = None) -> None:
     existing_task = db.query(MainTask).filter(MainTask.slug == slug).first()
     if existing_task and existing_task.id != current_task_id:
@@ -46,9 +15,24 @@ def ensure_main_task_slug_is_unique(db: Session, slug: str, current_task_id: int
 
 
 @router.get("/", response_model=list[MainTaskRead])
-def list_main_tasks(db: Session = Depends(get_db)):
-    tasks = db.query(MainTask).order_by(MainTask.id).all()
-    return [serialize_main_task(task) for task in tasks]
+def list_main_tasks(
+    status_filter: str | None = Query(default=None, alias="status"),
+    assign_to: str | None = Query(default=None),
+    slug: str | None = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=10, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    query = db.query(MainTask).order_by(MainTask.id)
+
+    if status_filter:
+        query = query.filter(MainTask.status == status_filter)
+    if assign_to:
+        query = query.filter(MainTask.assign_to == assign_to)
+    if slug:
+        query = query.filter(MainTask.slug == slug)
+
+    return query.offset(skip).limit(limit).all()
 
 
 @router.get("/{task_id}", response_model=MainTaskWithSubTasks)
@@ -61,7 +45,7 @@ def get_main_task(task_id: int, db: Session = Depends(get_db)):
     )
     if not task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Main task not found")
-    return serialize_main_task(task, include_sub_tasks=True)
+    return task
 
 
 @router.post("/", response_model=MainTaskRead, status_code=status.HTTP_201_CREATED)
@@ -72,12 +56,14 @@ def create_main_task(payload: MainTaskCreate, db: Session = Depends(get_db)):
         title=payload.title,
         slug=payload.slug,
         description=payload.description,
+        status=payload.status,
         assign_to=payload.assign_to,
+        due_date=payload.due_date,
     )
     db.add(task)
     db.commit()
     db.refresh(task)
-    return serialize_main_task(task)
+    return task
 
 
 @router.put("/{task_id}", response_model=MainTaskRead)
@@ -91,11 +77,13 @@ def replace_main_task(task_id: int, payload: MainTaskCreate, db: Session = Depen
     task.title = payload.title
     task.slug = payload.slug
     task.description = payload.description
+    task.status = payload.status
     task.assign_to = payload.assign_to
+    task.due_date = payload.due_date
 
     db.commit()
     db.refresh(task)
-    return serialize_main_task(task)
+    return task
 
 
 @router.patch("/{task_id}", response_model=MainTaskRead)
@@ -115,12 +103,16 @@ def update_main_task(task_id: int, payload: MainTaskUpdate, db: Session = Depend
         task.slug = updates["slug"]
     if "description" in updates:
         task.description = updates["description"]
+    if "status" in updates:
+        task.status = updates["status"]
     if "assign_to" in updates:
         task.assign_to = updates["assign_to"]
+    if "due_date" in updates:
+        task.due_date = updates["due_date"]
 
     db.commit()
     db.refresh(task)
-    return serialize_main_task(task)
+    return task
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -131,3 +123,4 @@ def delete_main_task(task_id: int, db: Session = Depends(get_db)):
 
     db.delete(task)
     db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
